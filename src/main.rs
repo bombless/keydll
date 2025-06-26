@@ -15,7 +15,7 @@ type DataEncryptC1 = unsafe extern "stdcall" fn(
 
 unsafe fn slice_of<'a>(actual_address: u64) -> &'a [u8] {
     unsafe {
-        slice::from_raw_parts(actual_address as _, 512)        
+        slice::from_raw_parts(actual_address as _, 512)
     }
 }
 
@@ -25,12 +25,12 @@ unsafe fn slice_of_ip<'a>(ip: u64, offset: u64, len: usize) -> &'a [u8] {
     }
 }
 
+
 unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
     let mut decoder = Decoder::with_ip(32, unsafe { slice_of(actual_address) }, rva_address, DecoderOptions::NONE);
     let mut formatter = NasmFormatter::new();
-    
-    let mut ret = Vec::new();
 
+    let mut ret = Vec::new();
 
     for instruction in decoder.iter() {
         // 反汇编当前指令
@@ -68,7 +68,7 @@ unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
             }
             _ => {}
         }
-        
+
         if instruction.mnemonic() == Mnemonic::Call {
             let addr = instruction.ip_rel_memory_address();
             println!("function call to {:08X} at {:08X}", addr, instruction.ip());
@@ -103,7 +103,7 @@ fn main() {
             .expect("Failed to get function");
 
         let func_ptr = func.clone().try_as_raw_ptr().unwrap() as *const u8;
-        
+
 
         const BASE : u64 = 0x45bc84;
         let rva_offset = func_ptr as u64 - BASE;
@@ -131,7 +131,7 @@ fn main() {
             // 如果是二进制数据，打印十六进制
             println!("返回值（二进制）：{:?}", encrypted_data);
         }
-        
+
         let calls = detect(func_ptr as _, BASE);
         println!("选择一个函数：");
         for (idx, &addr) in calls.iter().enumerate() {
@@ -151,6 +151,6 @@ fn main() {
                 println!("无效输入，请输入0-7之间的数字");
             }
         }
-        
+
     }
 }
