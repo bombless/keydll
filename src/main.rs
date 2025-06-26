@@ -34,6 +34,18 @@ fn main() {
         let func: Symbol<DataEncryptC1> = lib.get(b"DataEncrypt_C1")
             .expect("Failed to get function");
 
+        let func_ptr = func.clone().try_as_raw_ptr().unwrap() as *const u8;
+
+        // 打印前 16 个字节（注意：读取内存可能不安全！）
+        unsafe {
+            println!("First 16 bytes of the function:");
+            for i in 0..16 {
+                let byte = *func_ptr.add(i);
+                print!("{:02X} ", byte);
+            }
+            println!();
+        }
+
         // 调用函数
         let result = func(
             c_in_data.as_ptr(),
