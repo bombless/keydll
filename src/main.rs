@@ -1,6 +1,8 @@
 use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::os::raw::c_int;
+use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter};
+use std::slice;
 
 // 定义与 C 函数匹配的类型
 type DataEncryptC1 = unsafe extern "stdcall" fn(
@@ -44,6 +46,30 @@ fn main() {
                 print!("{:02X} ", byte);
             }
             println!();
+            let mut decoder = Decoder::with_ip(32, slice::from_raw_parts(func_ptr, 512), 0, DecoderOptions::NONE);
+            let mut formatter = NasmFormatter::new();
+
+            for instruction in decoder.iter() {
+                // 反汇编当前指令
+                let mut output = String::new();
+                formatter.format(&instruction, &mut output);
+                println!("{:016X} {}", instruction.ip(), output);
+
+                // 检查是否是无条件跳转（JMP）
+                if instruction.mnemonic() == Mnemonic::Jmp {
+                    println!("Found unconditional JMP, stopping.");
+                    break;
+                }
+
+                // 可选：检查其他终止条件（如 RET、INT3）
+                match instruction.mnemonic() {
+                    Mnemonic::Ret | Mnemonic::Int3 => {
+                        println!("Found RET/INT3, stopping.");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // 调用函数
