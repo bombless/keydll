@@ -4,6 +4,12 @@ use std::os::raw::c_int;
 use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, NasmFormatter};
 use std::slice;
 use std::io::stdin;
+use windows::Win32::System::Memory::{
+    VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE
+};
+use windows::Win32::Foundation::GetLastError;
+use std::mem;
+
 
 // 定义与 C 函数匹配的类型
 type DataEncryptC1 = unsafe extern "stdcall" fn(
@@ -25,6 +31,32 @@ unsafe fn slice_of_ip<'a>(ip: u64, offset: u64, len: usize) -> &'a [u8] {
     }
 }
 
+fn alloc_and_patch(address: *const u8, len: usize) -> Result<*mut u8, String> {
+    let allocation_size = len.checked_add(1).ok_or("len too large")?;
+
+    let new_code = unsafe {
+        VirtualAlloc(
+            None,
+            allocation_size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        )
+    };
+
+    if new_code.is_null() {
+        unsafe {
+            let error = GetLastError();
+            return Err(format!("VirtualAlloc failed with error: {}", error.0));
+        }
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(address, new_code.cast(), len);
+        *new_code.cast::<u8>().add(len) = 0xc3;
+    }
+
+    Ok(new_code.cast())
+}
 
 unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
     let mut decoder = Decoder::with_ip(32, unsafe { slice_of(actual_address) }, rva_address, DecoderOptions::NONE);
@@ -111,6 +143,7 @@ fn main() {
 
 
         const BASE : u64 = 0x45bc84;
+        
         let rva_offset = func_ptr as u64 - BASE;
         println!("address： {:08X}", func_ptr as usize);
 
@@ -135,6 +168,25 @@ fn main() {
         } else {
             // 如果是二进制数据，打印十六进制
             println!("返回值（二进制）：{:?}", encrypted_data);
+        }
+
+
+        const ADDR_CALL_DATA_ENCRYPT_END: u64 = 0x0045bd20;
+        
+        match alloc_and_patch(func_ptr as _, (ADDR_CALL_DATA_ENCRYPT_END - BASE) as _) {
+            Ok(func) => {
+                let hooked_func: DataEncryptC1 = mem::transmute(func);
+                println!("获得hooked_func");
+                let result = hooked_func(
+                    c_in_data.as_ptr(),
+                    c_key.as_ptr(),
+                    out_buffer.as_mut_ptr() as *mut std::os::raw::c_char,
+                    out_buffer_size as c_int
+                );
+                println!("hooked result {result:08X}");
+                
+            }
+            Err(err) => panic!("{err}")
         }
 
         let calls = detect(func_ptr as _, BASE);
