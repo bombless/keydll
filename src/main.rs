@@ -12,6 +12,63 @@ type DataEncryptC1 = unsafe extern "stdcall" fn(
     c_int
 ) -> c_int;
 
+unsafe fn slice_of<'a>(actual_address: u64) -> &'a [u8] {
+    unsafe {
+        slice::from_raw_parts(actual_address as _, 512)        
+    }
+}
+
+unsafe fn slice_of_ip<'a>(ip: u64, offset: u64, len: usize) -> &'a [u8] {
+    unsafe {
+        slice::from_raw_parts((ip + offset) as *const u8, len)
+    }
+}
+
+unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
+    let mut decoder = Decoder::with_ip(32, unsafe { slice_of(actual_address) }, rva_address, DecoderOptions::NONE);
+    let mut formatter = NasmFormatter::new();
+
+
+    for instruction in decoder.iter() {
+        // 反汇编当前指令
+        let mut output = String::new();
+        formatter.format(&instruction, &mut output);
+        let bytes = unsafe { slice_of_ip(instruction.ip(), actual_address - rva_address, instruction.len()) };
+        let bytes_string = format!("{bytes:X?}");
+        println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
+
+        // 检查是否是无条件跳转（JMP）
+        if instruction.mnemonic() == Mnemonic::Jmp {
+            // println!("{instruction:?}");
+            println!("==================\n You jump, I jump. \n==================");
+            let add = instruction.ip_rel_memory_address();
+            let offset = add - rva_address;
+            let mut decoder_jumped = Decoder::with_ip(32, unsafe { slice_of(actual_address + offset) }, add, DecoderOptions::NONE);
+            for instruction in decoder_jumped.iter() {
+                let mut output = String::new();
+                formatter.format(&instruction, &mut output);
+                let bytes = unsafe { slice_of_ip(instruction.ip(), actual_address - rva_address, instruction.len()) };
+                let bytes_string = format!("{bytes:X?}");
+                println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
+                if instruction.mnemonic() == Mnemonic::Ret {
+                    break;
+                }
+            }
+            break;
+        }
+
+        // 可选：检查其他终止条件（如 RET、INT3）
+        match instruction.mnemonic() {
+            Mnemonic::Ret | Mnemonic::Int3 => {
+                println!("Found RET/INT3, stopping.");
+                break;
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
 fn main() {
     // 输入数据和密钥
     let in_data = "D47240002000A00A";
@@ -37,60 +94,10 @@ fn main() {
             .expect("Failed to get function");
 
         let func_ptr = func.clone().try_as_raw_ptr().unwrap() as *const u8;
-
-
-        println!("First 16 bytes of the function:");
-        for i in 0..16 {
-            let byte = *func_ptr.add(i);
-            print!("{:02X} ", byte);
-        }
-        println!();
+        
 
         const BASE : u64 = 0x45bc84;
-        let mut decoder = Decoder::with_ip(32, slice::from_raw_parts(func_ptr, 512), BASE, DecoderOptions::NONE);
-        let mut formatter = NasmFormatter::new();
-
-
-        for instruction in decoder.iter() {
-            // 反汇编当前指令
-            let mut output = String::new();
-            formatter.format(&instruction, &mut output);
-            // let bytes = slice::from_raw_parts(func_ptr.offset(instruction.ip_rel_memory_address() as _), instruction.len());
-            // println!("instruction.ip_rel_memory_address() {:08X}", instruction.ip_rel_memory_address());
-            let bytes = slice::from_raw_parts(func_ptr.offset((instruction.ip() - BASE) as _), instruction.len());
-            let bytes_string = format!("{bytes:X?}");
-            println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
-
-            // 检查是否是无条件跳转（JMP）
-            if instruction.mnemonic() == Mnemonic::Jmp {
-                // println!("{instruction:?}");
-                println!("==================\n You jump, I jump. \n==================");
-                let add = instruction.ip_rel_memory_address();
-                let offset = add - BASE;
-                let mut decoder_jumped = Decoder::with_ip(32, slice::from_raw_parts(func_ptr.offset(offset as _), 256), add, DecoderOptions::NONE);
-                for instruction in decoder_jumped.iter() {
-                    let mut output = String::new();
-                    formatter.format(&instruction, &mut output);
-                    let bytes = slice::from_raw_parts(func_ptr.offset((instruction.ip() - BASE) as _), instruction.len());
-                    let bytes_string = format!("{bytes:X?}");
-                    println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
-                    if instruction.mnemonic() == Mnemonic::Ret {
-                        break;
-                    }
-                }
-                break;
-            }
-
-            // 可选：检查其他终止条件（如 RET、INT3）
-            match instruction.mnemonic() {
-                Mnemonic::Ret | Mnemonic::Int3 => {
-                    println!("Found RET/INT3, stopping.");
-                    break;
-                }
-                _ => {}
-            }
-        }
-
+        println!("address： {:08X}", func_ptr as usize);
 
         // 调用函数
         let result = func(
@@ -114,5 +121,7 @@ fn main() {
             // 如果是二进制数据，打印十六进制
             println!("返回值（二进制）：{:?}", encrypted_data);
         }
+        
+        detect(func_ptr as _, BASE);
     }
 }
