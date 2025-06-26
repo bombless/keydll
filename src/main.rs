@@ -1,7 +1,7 @@
 use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::os::raw::c_int;
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter};
+use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, NasmFormatter};
 use std::slice;
 
 // 定义与 C 函数匹配的类型
@@ -38,39 +38,59 @@ fn main() {
 
         let func_ptr = func.clone().try_as_raw_ptr().unwrap() as *const u8;
 
-        // 打印前 16 个字节（注意：读取内存可能不安全！）
-        unsafe {
-            println!("First 16 bytes of the function:");
-            for i in 0..16 {
-                let byte = *func_ptr.add(i);
-                print!("{:02X} ", byte);
-            }
-            println!();
-            let mut decoder = Decoder::with_ip(32, slice::from_raw_parts(func_ptr, 512), 0, DecoderOptions::NONE);
-            let mut formatter = NasmFormatter::new();
 
-            for instruction in decoder.iter() {
-                // 反汇编当前指令
-                let mut output = String::new();
-                formatter.format(&instruction, &mut output);
-                println!("{:016X} {}", instruction.ip(), output);
+        println!("First 16 bytes of the function:");
+        for i in 0..16 {
+            let byte = *func_ptr.add(i);
+            print!("{:02X} ", byte);
+        }
+        println!();
 
-                // 检查是否是无条件跳转（JMP）
-                if instruction.mnemonic() == Mnemonic::Jmp {
-                    println!("Found unconditional JMP, stopping.");
-                    break;
-                }
+        const BASE : u64 = 0x45bc84;
+        let mut decoder = Decoder::with_ip(32, slice::from_raw_parts(func_ptr, 512), BASE, DecoderOptions::NONE);
+        let mut formatter = NasmFormatter::new();
 
-                // 可选：检查其他终止条件（如 RET、INT3）
-                match instruction.mnemonic() {
-                    Mnemonic::Ret | Mnemonic::Int3 => {
-                        println!("Found RET/INT3, stopping.");
+
+        for instruction in decoder.iter() {
+            // 反汇编当前指令
+            let mut output = String::new();
+            formatter.format(&instruction, &mut output);
+            // let bytes = slice::from_raw_parts(func_ptr.offset(instruction.ip_rel_memory_address() as _), instruction.len());
+            // println!("instruction.ip_rel_memory_address() {:08X}", instruction.ip_rel_memory_address());
+            let bytes = slice::from_raw_parts(func_ptr.offset((instruction.ip() - BASE) as _), instruction.len());
+            let bytes_string = format!("{bytes:X?}");
+            println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
+
+            // 检查是否是无条件跳转（JMP）
+            if instruction.mnemonic() == Mnemonic::Jmp {
+                // println!("{instruction:?}");
+                println!("==================\n You jump, I jump. \n==================");
+                let add = instruction.ip_rel_memory_address();
+                let offset = add - BASE;
+                let mut decoder_jumped = Decoder::with_ip(32, slice::from_raw_parts(func_ptr.offset(offset as _), 256), add, DecoderOptions::NONE);
+                for instruction in decoder_jumped.iter() {
+                    let mut output = String::new();
+                    formatter.format(&instruction, &mut output);
+                    let bytes = slice::from_raw_parts(func_ptr.offset((instruction.ip() - BASE) as _), instruction.len());
+                    let bytes_string = format!("{bytes:X?}");
+                    println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
+                    if instruction.mnemonic() == Mnemonic::Ret {
                         break;
                     }
-                    _ => {}
                 }
+                break;
+            }
+
+            // 可选：检查其他终止条件（如 RET、INT3）
+            match instruction.mnemonic() {
+                Mnemonic::Ret | Mnemonic::Int3 => {
+                    println!("Found RET/INT3, stopping.");
+                    break;
+                }
+                _ => {}
             }
         }
+
 
         // 调用函数
         let result = func(
