@@ -1,0 +1,2 @@
+[build]
+target = "i686-pc-windows-msvc"  # 32 位 Windows (MSVC ABI)
