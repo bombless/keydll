@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::os::raw::c_int;
 use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, NasmFormatter};
 use std::slice;
+use std::io::stdin;
 
 // 定义与 C 函数匹配的类型
 type DataEncryptC1 = unsafe extern "stdcall" fn(
@@ -105,6 +106,7 @@ fn main() {
         
 
         const BASE : u64 = 0x45bc84;
+        let rva_offset = func_ptr as u64 - BASE;
         println!("address： {:08X}", func_ptr as usize);
 
         // 调用函数
@@ -134,6 +136,20 @@ fn main() {
         println!("选择一个函数：");
         for (idx, &addr) in calls.iter().enumerate() {
             println!("{idx}. function call to {addr:08X}");
+        }
+        // 读取用户输入
+        let mut input = String::new();
+        stdin().read_line(&mut input).expect("无法读取输入");
+
+        // 解析输入为数字
+        match input.trim().parse::<usize>() {
+            Ok(choice) if choice < calls.len() => {
+                println!("你选择了: {}", choice);
+                detect(calls[choice] + rva_offset, calls[choice]);
+            }
+            _ => {
+                println!("无效输入，请输入0-7之间的数字");
+            }
         }
         
     }
