@@ -72,6 +72,11 @@ unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
         if instruction.mnemonic() == Mnemonic::Call {
             let addr = instruction.ip_rel_memory_address();
             println!("function call to {:08X} at {:08X}", addr, instruction.ip());
+            if addr == 0x0045b9e0 {
+                println!("此处调用DataEncrypt，真实地址{:08X}", actual_address - rva_address + instruction.ip());
+                println!("actual_address ({actual_address:08X}) - rva_address ({rva_address:08X}) + instruction.ip() ({:08X})", instruction.ip());
+                println!("{}", actual_address - rva_address + instruction.ip() == instruction.ip());
+            }
             ret.push(addr);
         }
     }
