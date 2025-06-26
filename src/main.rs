@@ -27,6 +27,8 @@ unsafe fn slice_of_ip<'a>(ip: u64, offset: u64, len: usize) -> &'a [u8] {
 unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
     let mut decoder = Decoder::with_ip(32, unsafe { slice_of(actual_address) }, rva_address, DecoderOptions::NONE);
     let mut formatter = NasmFormatter::new();
+    
+    let mut ret = Vec::new();
 
 
     for instruction in decoder.iter() {
@@ -65,8 +67,14 @@ unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
             }
             _ => {}
         }
+        
+        if instruction.mnemonic() == Mnemonic::Call {
+            let addr = instruction.ip_rel_memory_address();
+            println!("function call to {:08X} at {:08X}", addr, instruction.ip());
+            ret.push(addr);
+        }
     }
-    Vec::new()
+    ret
 }
 
 fn main() {
@@ -122,6 +130,11 @@ fn main() {
             println!("返回值（二进制）：{:?}", encrypted_data);
         }
         
-        detect(func_ptr as _, BASE);
+        let calls = detect(func_ptr as _, BASE);
+        println!("选择一个函数：");
+        for (idx, &addr) in calls.iter().enumerate() {
+            println!("{idx}. function call to {addr:08X}");
+        }
+        
     }
 }
