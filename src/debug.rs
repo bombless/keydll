@@ -171,7 +171,7 @@ fn main() {
         }
 
 
-        const ADDR_CALL_DATA_ENCRYPT_END: u64 = 0x0045bd20;
+        const ADDR_CALL_DATA_ENCRYPT_END: u64 = 0x0045bd34;
         
         match alloc_and_patch(func_ptr as _, (ADDR_CALL_DATA_ENCRYPT_END - BASE) as _) {
             Ok(func) => {
