@@ -3,7 +3,7 @@ use std::ffi::CString;
 use std::os::raw::c_int;
 
 // 定义与 C 函数匹配的类型
-type DataEncryptC1 = unsafe extern "C" fn(
+type DataEncryptC1 = unsafe extern "stdcall" fn(
     *const std::os::raw::c_char,
     *const std::os::raw::c_char,
     *mut std::os::raw::c_char,
