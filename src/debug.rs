@@ -31,8 +31,17 @@ unsafe fn slice_of_ip<'a>(ip: u64, offset: u64, len: usize) -> &'a [u8] {
     }
 }
 
-fn alloc_and_patch(address: *const u8, len: usize) -> Result<*mut u8, String> {
-    let allocation_size = len.checked_add(1).ok_or("len too large")?;
+fn alloc_and_patch(address: *const u8, len: usize, push_count: u8) -> Result<*mut u8, String> {
+    const RET : &'static [u8] = &[
+        0x5f, // pop edi
+        0x5e, // pop esi
+        0x5b, // pop ebx
+        0x8b, 0xe5, // mov esp, ebp
+        0x5d, // pop ebp
+        0xc2, 0x10, 0, // ret 10h
+    ];
+    let extra_bytes = push_count as usize;
+    let allocation_size = len.checked_add(RET.len() + extra_bytes).ok_or("len too large")?;
 
     let new_code = unsafe {
         VirtualAlloc(
@@ -52,25 +61,57 @@ fn alloc_and_patch(address: *const u8, len: usize) -> Result<*mut u8, String> {
 
     unsafe {
         std::ptr::copy_nonoverlapping(address, new_code.cast(), len);
-        *new_code.cast::<u8>().add(len) = 0xc3;
+        for i in 0 .. push_count {
+            std::ptr::copy_nonoverlapping(&0x59 /* pop ecx */, new_code.cast::<u8>().add(i as usize + len), 1);
+        }
+        std::ptr::copy_nonoverlapping(RET.as_ptr(), new_code.cast::<u8>().add(push_count as usize + len), RET.len());
     }
 
     Ok(new_code.cast())
 }
 
-unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
+struct FunctionInfo {
+    calls: Vec<u64>,
+    instructions: Vec<(u64, u64)>,
+}
+
+unsafe fn detect(actual_address: u64, rva_address: u64, len: Option<u64>, mut skip_countdown: u64) -> FunctionInfo {
     let mut decoder = Decoder::with_ip(32, unsafe { slice_of(actual_address) }, rva_address, DecoderOptions::NONE);
     let mut formatter = NasmFormatter::new();
 
-    let mut ret = Vec::new();
+    let mut calls = Vec::new();
+    let mut instructions = Vec::new();
+    let mut push_count = 0;
 
     for instruction in decoder.iter() {
         // 反汇编当前指令
         let mut output = String::new();
         formatter.format(&instruction, &mut output);
+        if let Some(len) = len {
+            if instruction.ip() >= rva_address + len {
+                break;
+            }
+        }
+        if skip_countdown > 0 {
+            skip_countdown -= 1;
+        }
+
         let bytes = unsafe { slice_of_ip(instruction.ip(), actual_address - rva_address, instruction.len()) };
         let bytes_string = format!("{bytes:X?}");
         println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
+
+
+
+        instructions.push((instruction.ip(), push_count));
+
+        if skip_countdown == 0 {
+            if instruction.mnemonic() == Mnemonic::Push {
+                push_count += 1;
+            }
+            if instruction.mnemonic() == Mnemonic::Pop {
+                push_count -= 1;
+            }
+        }
 
         // 检查是否是无条件跳转（JMP）
         if instruction.mnemonic() == Mnemonic::Jmp {
@@ -85,6 +126,22 @@ unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
                 let bytes = unsafe { slice_of_ip(instruction.ip(), actual_address - rva_address, instruction.len()) };
                 let bytes_string = format!("{bytes:X?}");
                 println!("{:08X} {bytes_string:>32} {}", instruction.ip(), output);
+
+                if skip_countdown > 0 {
+                    skip_countdown -= 1;
+                }
+
+                instructions.push((instruction.ip(), push_count));
+
+                if skip_countdown == 0 {
+                    if instruction.mnemonic() == Mnemonic::Push {
+                        push_count += 1;
+                    }
+                    if instruction.mnemonic() == Mnemonic::Pop {
+                        push_count -= 1;
+                    }
+                }
+
                 if instruction.mnemonic() == Mnemonic::Ret {
                     break;
                 }
@@ -101,18 +158,32 @@ unsafe fn detect(actual_address: u64, rva_address: u64) -> Vec<u64> {
             _ => {}
         }
 
+        if let Some(len) = len {
+            if instruction.is_ip_rel_memory_operand() {
+                let addr = instruction.ip_rel_memory_address();
+                if addr < rva_address || addr > rva_address + len {
+                    println!("相对地址跳转超出范围！");
+                }
+            }
+        }
+
+
+
         if instruction.mnemonic() == Mnemonic::Call {
             let addr = instruction.ip_rel_memory_address();
-            println!("function call to {:08X} at {:08X}", addr, instruction.ip());
-            if addr == 0x0045b9e0 {
-                println!("此处调用DataEncrypt，真实地址{:08X}", actual_address - rva_address + instruction.ip());
-                println!("actual_address ({actual_address:08X}) - rva_address ({rva_address:08X}) + instruction.ip() ({:08X})", instruction.ip());
-                println!("{}", actual_address - rva_address + instruction.ip() == instruction.ip());
-            }
-            ret.push(addr);
+            // println!("function call to {:08X} at {:08X}", addr, instruction.ip());
+            // if addr == 0x0045b9e0 {
+            //     println!("此处调用DataEncrypt，真实地址{:08X}", actual_address - rva_address + instruction.ip());
+            //     println!("actual_address ({actual_address:08X}) - rva_address ({rva_address:08X}) + instruction.ip() ({:08X})", instruction.ip());
+            //     println!("{}", actual_address - rva_address + instruction.ip() == instruction.ip());
+            // }
+            calls.push(addr);
         }
     }
-    ret
+    FunctionInfo {
+        calls,
+        instructions,
+    }
 }
 
 fn main() {
@@ -171,25 +242,50 @@ fn main() {
         }
 
 
-        const ADDR_CALL_DATA_ENCRYPT_END: u64 = 0x0045bd34;
-        
-        match alloc_and_patch(func_ptr as _, (ADDR_CALL_DATA_ENCRYPT_END - BASE) as _) {
-            Ok(func) => {
-                let hooked_func: DataEncryptC1 = mem::transmute(func);
-                println!("获得hooked_func");
-                let result = hooked_func(
-                    c_in_data.as_ptr(),
-                    c_key.as_ptr(),
-                    out_buffer.as_mut_ptr() as *mut std::os::raw::c_char,
-                    out_buffer_size as c_int
-                );
-                println!("hooked result {result:08X}");
-                
+        // const ADDR_CALL_DATA_ENCRYPT_END: u64 = 0x0045bd34;
+        //
+        // match alloc_and_patch(func_ptr as _, (ADDR_CALL_DATA_ENCRYPT_END - BASE) as _) {
+        //     Ok(func) => {
+        //         let hooked_func: DataEncryptC1 = mem::transmute(func);
+        //         println!("获得hooked_func");
+        //         let result = hooked_func(
+        //             c_in_data.as_ptr(),
+        //             c_key.as_ptr(),
+        //             out_buffer.as_mut_ptr() as *mut std::os::raw::c_char,
+        //             out_buffer_size as c_int
+        //         );
+        //         println!("hooked result {result:08X}");
+        //
+        //     }
+        //     Err(err) => panic!("{err}")
+        // }
+
+        let FunctionInfo { calls, instructions, .. } = detect(func_ptr as _, BASE, None, 12);
+
+        for &(i, push_count) in instructions.iter().skip(12) {
+            println!("尝试地址{i:08X}");
+            println!("也就是说，长度是{:X}h", i - BASE);
+            println!("push_count {push_count}");
+            match alloc_and_patch(func_ptr as _, (i - BASE) as _, push_count as _) {
+                Ok(func) => {
+                    let hooked_func: DataEncryptC1 = mem::transmute(func);
+                    println!("获得hooked_func");
+                    println!("看看新函数");
+                    detect(hooked_func as _, BASE, None, 0);
+                    println!("调用一下看看");
+                    let result = hooked_func(
+                        c_in_data.as_ptr(),
+                        c_key.as_ptr(),
+                        out_buffer.as_mut_ptr() as *mut std::os::raw::c_char,
+                        out_buffer_size as c_int
+                    );
+                    println!("hooked result {result:08X}");
+
+                }
+                Err(err) => panic!("{err}")
             }
-            Err(err) => panic!("{err}")
         }
 
-        let calls = detect(func_ptr as _, BASE);
         println!("选择一个函数：");
         for (idx, &addr) in calls.iter().enumerate() {
             println!("{idx}. function call to {addr:08X}");
@@ -202,7 +298,7 @@ fn main() {
         match input.trim().parse::<usize>() {
             Ok(choice) if choice < calls.len() => {
                 println!("你选择了: {}", choice);
-                detect(calls[choice] + rva_offset, calls[choice]);
+                detect(calls[choice] + rva_offset, calls[choice], None, 0);
             }
             _ => {
                 println!("无效输入，请输入0-7之间的数字");
