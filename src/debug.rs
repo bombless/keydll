@@ -9,6 +9,7 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::Foundation::GetLastError;
 use std::mem;
+use std::borrow::BorrowMut;
 
 
 // 定义与 C 函数匹配的类型
@@ -69,6 +70,69 @@ fn alloc_and_patch(address: *const u8, len: usize, push_count: u8) -> Result<*mu
 
     Ok(new_code.cast())
 }
+
+struct Rva(u64);
+#[derive(PartialEq, Eq)]
+enum StackStateAtom {
+    Push,
+    Seh(SehPointerLocation),
+}
+
+#[derive(Default)]
+struct StackState(Vec<StackStateAtom>);
+
+#[derive(PartialEq, Eq)]
+enum SehPointerLocation {
+    StackTop,
+    Register(iced_x86::Register),
+}
+
+impl StackState {
+    fn push(&mut self) {
+        self.0.push(StackStateAtom::Push);
+    }
+    fn pop(&mut self, reg: iced_x86::Register) -> Result<(), ()> {
+        let mut push_idx = None;
+        let mut seh_rearrange = false;
+        for (idx, item) in self.0.iter().rev().enumerate() {
+            if *item  == StackStateAtom::Push {
+                push_idx = Some(idx);
+                break;
+            }
+            if let StackStateAtom::Seh(SehPointerLocation::StackTop) = item {
+                seh_rearrange = true;
+            }
+        }
+        let push_idx = if let Some(idx) = push_idx {
+            idx
+        } else {
+            return Err(());
+        };
+        match self.0.borrow_mut().last() {
+            StackStateAtom::Seh(pointer_location @ SehPointerLocation::StackTop) => {
+                
+            }
+        }
+        if seh_rearrange {
+            for item in self.0.iter_mut() {
+                if let  StackStateAtom::Seh(pointer_location @ SehPointerLocation::StackTop) = item {
+                    if let SehPointerLocation::StackTop = pointer_location { }
+                }
+            }
+        }
+        
+        self.0.remove(push_idx);
+        
+        
+        Ok(())
+    }
+    
+    fn install_seh(&mut self) {
+        self.0.push(StackStateAtom::Seh(SehPointerLocation::StackTop));
+    }
+}
+
+
 
 struct FunctionInfo {
     calls: Vec<u64>,
