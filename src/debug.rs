@@ -1,7 +1,7 @@
 use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::os::raw::c_int;
-use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, NasmFormatter};
+use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind, Register};
 use std::slice;
 use std::io::stdin;
 use windows::Win32::System::Memory::{
@@ -32,7 +32,7 @@ unsafe fn slice_of_ip<'a>(ip: u64, offset: u64, len: usize) -> &'a [u8] {
     }
 }
 
-fn alloc_and_patch(address: *const u8, len: usize, push_count: u8) -> Result<*mut u8, String> {
+fn alloc_and_patch(address: *const u8, len: usize, stack_state: &StackState) -> Result<*mut u8, String> {
     const RET : &'static [u8] = &[
         0x5f, // pop edi
         0x5e, // pop esi
@@ -41,8 +41,10 @@ fn alloc_and_patch(address: *const u8, len: usize, push_count: u8) -> Result<*mu
         0x5d, // pop ebp
         0xc2, 0x10, 0, // ret 10h
     ];
-    let extra_bytes = push_count as usize;
-    let allocation_size = len.checked_add(RET.len() + extra_bytes).ok_or("len too large")?;
+    
+    let instructions = stack_state.get_instructions().unwrap();
+    
+    let allocation_size = len.checked_add(RET.len() + instructions.len()).ok_or("len too large")?;
 
     let new_code = unsafe {
         VirtualAlloc(
@@ -62,26 +64,24 @@ fn alloc_and_patch(address: *const u8, len: usize, push_count: u8) -> Result<*mu
 
     unsafe {
         std::ptr::copy_nonoverlapping(address, new_code.cast(), len);
-        for i in 0 .. push_count {
-            std::ptr::copy_nonoverlapping(&0x59 /* pop ecx */, new_code.cast::<u8>().add(i as usize + len), 1);
-        }
-        std::ptr::copy_nonoverlapping(RET.as_ptr(), new_code.cast::<u8>().add(push_count as usize + len), RET.len());
+        std::ptr::copy_nonoverlapping(instructions.as_ptr(), new_code.cast::<u8>().add(len), instructions.len());
+        std::ptr::copy_nonoverlapping(RET.as_ptr(), new_code.cast::<u8>().add(instructions.len() + len), RET.len());
     }
 
     Ok(new_code.cast())
 }
 
 struct Rva(u64);
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 enum StackStateAtom {
     Push,
     Seh(SehPointerLocation),
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct StackState(Vec<StackStateAtom>);
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 enum SehPointerLocation {
     StackTop,
     Register(iced_x86::Register),
@@ -108,10 +108,11 @@ impl StackState {
         } else {
             return Err(());
         };
-        match self.0.borrow_mut().last() {
-            StackStateAtom::Seh(pointer_location @ SehPointerLocation::StackTop) => {
-                
+        match self.0.last_mut() {
+            Some(StackStateAtom::Seh(pointer_location @ SehPointerLocation::StackTop)) => {
+                *pointer_location = SehPointerLocation::Register(reg);
             }
+            _ => ()
         }
         if seh_rearrange {
             for item in self.0.iter_mut() {
@@ -130,13 +131,73 @@ impl StackState {
     fn install_seh(&mut self) {
         self.0.push(StackStateAtom::Seh(SehPointerLocation::StackTop));
     }
+    fn uninstall_seh(&mut self) -> Result<(), ()> {
+        let mut seh_idx = None;
+        for (idx, item) in self.0.iter().rev().enumerate() {
+            match item {
+                StackStateAtom::Seh(_) => {
+                    seh_idx = Some(idx);
+                    break;
+                }
+                _ => ()
+            }
+        }
+        if let Some(idx) = seh_idx {
+            self.0.remove(idx);
+            Ok(())
+        } else {
+           Err(())
+        }
+        
+    }
+    
+    fn get_instructions(&self) -> Result<Vec<u8>, ()> {
+        let mut ret = Vec::new();
+        let mut pop = false;
+        for item in self.0.iter().rev() {
+            match item {
+                StackStateAtom::Seh(SehPointerLocation::StackTop) => {
+                    if pop {
+                        return Err(());
+                    }
+                    pop = true;
+                    ret.extend([
+                                   0x5a, // pop edx
+                                   0x33, 0xc9, // xor ecx
+                                   0x64, 0x89, 0x11, // MOV        dword ptr FS:[ECX],EDX
+                    ]);
+                }
+                StackStateAtom::Seh(SehPointerLocation::Register(reg)) => {
+                    if pop {
+                        return Err(());
+                    }
+                    if *reg == Register::EDX {
+                        ret.extend(&[
+                            0x33, 0xc9, // xor ecx
+                            0x64, 0x89, 0x11, // MOV        dword ptr FS:[ECX],EDX
+                        ]);
+                    } else {
+                        return Err(());
+                    }
+                }
+                StackStateAtom::Push => {
+                    if pop {
+                        pop = false;
+                        continue;
+                    }
+                    ret.push(0x59); // pop ecx
+                }
+            }
+        }
+        Ok(ret)
+    }
 }
 
 
 
 struct FunctionInfo {
     calls: Vec<u64>,
-    instructions: Vec<(u64, u64)>,
+    instructions: Vec<(Rva, StackState)>,
 }
 
 unsafe fn detect(actual_address: u64, rva_address: u64, len: Option<u64>, mut skip_countdown: u64) -> FunctionInfo {
@@ -145,7 +206,7 @@ unsafe fn detect(actual_address: u64, rva_address: u64, len: Option<u64>, mut sk
 
     let mut calls = Vec::new();
     let mut instructions = Vec::new();
-    let mut push_count = 0;
+    let mut stack_state = StackState::default();
 
     for instruction in decoder.iter() {
         // 反汇编当前指令
@@ -166,14 +227,21 @@ unsafe fn detect(actual_address: u64, rva_address: u64, len: Option<u64>, mut sk
 
 
 
-        instructions.push((instruction.ip(), push_count));
+        instructions.push((Rva(instruction.ip()), stack_state.clone()));
 
         if skip_countdown == 0 {
             if instruction.mnemonic() == Mnemonic::Push {
-                push_count += 1;
+                stack_state.push()
             }
             if instruction.mnemonic() == Mnemonic::Pop {
-                push_count -= 1;
+                stack_state.pop(instruction.op0_register()).unwrap();
+            }
+            if instruction.mnemonic() == Mnemonic::Mov && instruction.op0_kind() == OpKind::Memory && instruction.memory_segment() == Register::FS {
+                if instruction.op1_register() == Register::ESP {
+                    stack_state.install_seh();
+                } else {
+                    stack_state.uninstall_seh().unwrap();
+                }
             }
         }
 
@@ -195,14 +263,21 @@ unsafe fn detect(actual_address: u64, rva_address: u64, len: Option<u64>, mut sk
                     skip_countdown -= 1;
                 }
 
-                instructions.push((instruction.ip(), push_count));
+                instructions.push((Rva(instruction.ip()), stack_state.clone()));
 
                 if skip_countdown == 0 {
                     if instruction.mnemonic() == Mnemonic::Push {
-                        push_count += 1;
+                        stack_state.push();
                     }
                     if instruction.mnemonic() == Mnemonic::Pop {
-                        push_count -= 1;
+                        stack_state.pop(instruction.op0_register()).unwrap();
+                    }
+                    if instruction.mnemonic() == Mnemonic::Mov && instruction.op0_kind() == OpKind::Memory && instruction.memory_segment() == Register::FS {
+                        if instruction.op1_register() == Register::ESP {
+                            stack_state.install_seh();
+                        } else {
+                            stack_state.uninstall_seh().unwrap();
+                        }
                     }
                 }
 
@@ -326,11 +401,10 @@ fn main() {
 
         let FunctionInfo { calls, instructions, .. } = detect(func_ptr as _, BASE, None, 12);
 
-        for &(i, push_count) in instructions.iter().skip(12) {
+        for &(Rva(i), ref stack_state) in instructions.iter().skip(12) {
             println!("尝试地址{i:08X}");
             println!("也就是说，长度是{:X}h", i - BASE);
-            println!("push_count {push_count}");
-            match alloc_and_patch(func_ptr as _, (i - BASE) as _, push_count as _) {
+            match alloc_and_patch(func_ptr as _, (i - BASE) as _, &stack_state) {
                 Ok(func) => {
                     let hooked_func: DataEncryptC1 = mem::transmute(func);
                     println!("获得hooked_func");
