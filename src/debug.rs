@@ -1,7 +1,7 @@
 use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::os::raw::c_int;
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, NasmFormatter, OpKind, Register};
 use std::slice;
 use std::io::stdin;
 use windows::Win32::System::Memory::{
@@ -9,7 +9,6 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::Foundation::GetLastError;
 use std::mem;
-use std::borrow::BorrowMut;
 
 
 // 定义与 C 函数匹配的类型
@@ -84,14 +83,14 @@ struct StackState(Vec<StackStateAtom>);
 #[derive(PartialEq, Eq, Clone)]
 enum SehPointerLocation {
     StackTop,
-    Register(iced_x86::Register),
+    Register(Register),
 }
 
 impl StackState {
     fn push(&mut self) {
         self.0.push(StackStateAtom::Push);
     }
-    fn pop(&mut self, reg: iced_x86::Register) -> Result<(), ()> {
+    fn pop(&mut self, reg: Register) -> Result<(), ()> {
         let mut push_idx = None;
         let mut seh_rearrange = false;
         for (idx, item) in self.0.iter().rev().enumerate() {
