@@ -10,6 +10,8 @@ use windows::Win32::System::Memory::{
 use windows::Win32::Foundation::GetLastError;
 use std::mem;
 
+mod stepper;
+
 
 // 定义与 C 函数匹配的类型
 type DataEncryptC1 = unsafe extern "stdcall" fn(
@@ -187,9 +189,16 @@ unsafe fn detect(actual_address: u64, rva_address: u64, len: Option<u64>, mut sk
 }
 
 fn main() {
+    // 用法：
+    //   debug                          原有的探测流程
+    //   debug step [in_data [key]]     在交互式单步调试器里执行 DataEncrypt_C1（见 stepper.rs）
+    let cli: Vec<String> = std::env::args().skip(1).collect();
+    let step_mode = cli.first().is_some_and(|a| a == "step");
+    let step_args = if step_mode { &cli[1..] } else { &cli[..0] };
+
     // 输入数据和密钥
-    let in_data = "D47240002000A00A";
-    let key = "B48AFD20C61FBFDB";
+    let in_data = step_args.first().map(String::as_str).unwrap_or("D47240002000A00A");
+    let key = step_args.get(1).map(String::as_str).unwrap_or("B48AFD20C61FBFDB");
 
     println!("参数1：{}", in_data);
     println!("参数2：{}", key);
@@ -219,12 +228,29 @@ fn main() {
         println!("address： {:08X}", func_ptr as usize);
 
         // 调用函数
-        let result = func(
-            c_in_data.as_ptr(),
-            c_key.as_ptr(),
-            out_buffer.as_mut_ptr() as *mut std::os::raw::c_char,
-            out_buffer_size as c_int
-        );
+        let result = if step_mode {
+            // 单步模式：交给 stepper 置位 TF 后再调用，逐条指令停下来
+            let args = [
+                c_in_data.as_ptr() as usize,
+                c_key.as_ptr() as usize,
+                out_buffer.as_mut_ptr() as usize,
+                out_buffer_size,
+            ];
+            match stepper::run(func_ptr, BASE as u32, args) {
+                Ok(result) => result,
+                Err(err) => {
+                    println!("单步调试失败：{err}");
+                    return;
+                }
+            }
+        } else {
+            func(
+                c_in_data.as_ptr(),
+                c_key.as_ptr(),
+                out_buffer.as_mut_ptr() as *mut std::os::raw::c_char,
+                out_buffer_size as c_int
+            )
+        };
         if result <= 0 {
             println!("加密失败，返回值：{}", result);
             return;
@@ -239,6 +265,10 @@ fn main() {
         } else {
             // 如果是二进制数据，打印十六进制
             println!("返回值（二进制）：{:?}", encrypted_data);
+        }
+
+        if step_mode {
+            return;
         }
 
 
