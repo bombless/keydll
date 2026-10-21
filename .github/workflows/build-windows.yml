@@ -1,0 +1,43 @@
+name: Build Windows executables
+
+on:
+  push:
+    branches:
+      - feature/single-step
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - name: Build release executables
+        run: cargo build --release --bins --target i686-pc-windows-msvc
+
+      - name: Prepare runnable package
+        shell: pwsh
+        run: |
+          $package = "dist"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item "target/i686-pc-windows-msvc/release/simple.exe" $package
+          Copy-Item "target/i686-pc-windows-msvc/release/debug.exe" $package
+          Copy-Item "Keydll.dll" $package
+          Copy-Item "borlndmm.dll" $package
+
+      - name: Upload executables and runtime DLLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: keydll-windows-x86
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
